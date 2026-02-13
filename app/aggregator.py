@@ -125,7 +125,7 @@ class Aggregator:
 
         # Build Message
         lines = []
-        lines.append(f"💵*Portfolio summary {current_date}*")
+        lines.append(f"💵 <b>Portfolio summary {current_date}</b>")
         lines.append("")
 
         lines.append("<b>RUB</b>")

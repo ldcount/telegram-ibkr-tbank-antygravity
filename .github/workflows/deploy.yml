@@ -18,13 +18,9 @@ jobs:
           port: ${{ secrets.SSH_PORT }}
           script: |
             cd /opt/bots/portfolio_bot
-            
-            # Critical Ownership Fix for Root/Deploy conflict
-            git config --global --add safe.directory /opt/bots/portfolio_bot
-            
+                   
             # Sync Files
-            git fetch origin master
-            git reset --hard origin/master
+            git pull origin master
             
             # Update Environment
             ./venv/bin/pip install -r requirements.txt
