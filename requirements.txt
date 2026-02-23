@@ -7,3 +7,4 @@ apscheduler
 websockets
 pytz
 t-tech-investments
+matplotlib

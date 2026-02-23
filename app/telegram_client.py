@@ -5,6 +5,7 @@ from datetime import datetime
 from app.config import Config
 from app.aggregator import Aggregator
 from app import history_manager
+from app import chart as chart_module
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +153,7 @@ class TelegramBot:
             )
             return
 
+        # --- Text summary ---
         lines = ["📅 <b>Portfolio history (last 30 days)</b>\n"]
         for e in entries:
             usd_fmt = f"${e['USD']:,.0f}".replace(",", " ")
@@ -161,6 +163,20 @@ class TelegramBot:
             )
 
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+        # --- Chart image ---
+        try:
+            buf = chart_module.build_portfolio_chart(entries)
+            await update.message.reply_photo(
+                photo=buf,
+                caption="📈 Portfolio USD trend (every 3rd data point)",
+            )
+        except RuntimeError as e:
+            # matplotlib not installed — skip chart silently
+            logger.warning(f"Chart skipped (matplotlib unavailable): {e}")
+        except Exception as e:
+            logger.error(f"Chart generation failed: {e}")
+            await update.message.reply_text("⚠️ Could not generate chart.")
 
     # ------------------------------------------------------------------
     # Scheduled job
