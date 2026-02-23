@@ -18,16 +18,46 @@ Then it sends one formatted Telegram message with:
 
 ## 1) How it works (high level)
 
-1. Telegram bot receives `/status` command **or** runs on a schedule (`POLL_INTERVAL_MINUTES`).
+1. Telegram bot receives a command (e.g. `/status`) **or** runs on a schedule (`POLL_INTERVAL_MINUTES`).
 2. The app requests balances from each configured platform.
 3. Results are aggregated in `app/aggregator.py`.
 4. A single HTML-formatted message is sent to your configured Telegram chat.
+5. After each scheduled report, the current portfolio totals are saved to `data/portfolio_history.json` (one entry per day).
 
 Main entrypoint: `app/main.py`.
 
 ---
 
-## 2) Configuration via `.env`
+## 2) Bot commands
+
+| Command | Description |
+|---|---|
+| `/status` | Fetch and send the current portfolio snapshot immediately |
+| `/frequency <minutes>` | Change how often the bot sends automatic snapshots (e.g. `/frequency 60`) |
+| `/history` | Show portfolio values for up to the last 30 days |
+| `/help` | List all available commands with descriptions |
+
+---
+
+## 3) Portfolio history
+
+After each scheduled snapshot the bot writes today's portfolio totals to `data/portfolio_history.json`:
+
+```json
+{
+  "23-02-2026": { "USD": 42500.00, "RUB": 3932500.00 },
+  "22-02-2026": { "USD": 43050.20, "RUB": 3982143.50 }
+}
+```
+
+- Key format: `DD-MM-YYYY`
+- Only the **last** scheduled run of the day is stored (each run overwrites the same key).
+- `/history` returns entries sorted newest-first, up to 30 days.
+- The file is created automatically on first write; the `data/` folder is committed with 5 seeded dummy entries so `/history` works immediately.
+
+---
+
+## 4) Configuration via `.env`
 
 Create a `.env` file in the project root. All settings are loaded from environment variables.
 
@@ -49,14 +79,14 @@ Create a `.env` file in the project root. All settings are loaded from environme
 - `IBKR_FLEX_TOKEN` — IBKR Flex Web Service token.
 - `IBKR_QUERY_ID` — ID of your saved Flex query.
 - `TIMEZONE` (default: `Europe/Paris`)
-- `POLL_INTERVAL_MINUTES` (default: `120`)
+- `POLL_INTERVAL_MINUTES` (default: `120`) — startup default; can be changed live with `/frequency`.
 - `WINDOW_START_HOUR` (default: `8`)
 - `WINDOW_END_HOUR` (default: `20`)
 - `LOG_LEVEL` (default: `INFO`)
 
 ---
 
-## 3) `.env` template
+## 5) `.env` template
 
 You can copy this directly:
 
@@ -98,7 +128,7 @@ LOG_LEVEL=INFO
 
 ---
 
-## 4) Where to get each key/token
+## 6) Where to get each key/token
 
 ## 4.1 Telegram
 1. Open Telegram and message **@BotFather**.
@@ -142,7 +172,7 @@ How to get them is in the next section.
 
 ---
 
-## 5) IBKR: how to create a Flex Web Query (step-by-step)
+## 7) IBKR: how to create a Flex Web Query (step-by-step)
 
 This project uses **IBKR Flex Web Service**, not Client Portal Gateway.
 
@@ -179,7 +209,7 @@ If XML is returned and includes your account summary/NAV, configuration is corre
 
 ---
 
-## 6) Run locally
+## 8) Run locally
 
 ```bash
 python3 -m venv .venv
@@ -190,11 +220,14 @@ python -m app.main
 ```
 
 Try in Telegram:
-- `/status`
+- `/status` — immediate portfolio snapshot
+- `/frequency 5` — switch to 5-minute scan interval
+- `/history` — view past 30 days (5 dummy entries pre-loaded)
+- `/help` — list all commands
 
 ---
 
-## 7) Complete Ubuntu VPS deployment algorithm (private server)
+## 9) Complete Ubuntu VPS deployment algorithm (private server)
 
 Use this exact sequence on a clean Ubuntu VPS.
 
@@ -275,7 +308,7 @@ journalctl -u portfolio-bot -f
 
 ---
 
-## 8) Security checklist
+## 10) Security checklist
 
 - Use **read-only** API keys on all platforms.
 - Never commit `.env`.
@@ -286,12 +319,14 @@ journalctl -u portfolio-bot -f
 
 ---
 
-## 9) Useful project files
+## 11) Useful project files
 
 - `app/main.py` — app entrypoint
 - `app/config.py` — env config + defaults + validation
 - `app/telegram_client.py` — command handling + scheduled sending
 - `app/aggregator.py` — combines platform balances
+- `app/history_manager.py` — reads/writes daily portfolio snapshots
+- `data/portfolio_history.json` — persistent daily history log
 - `app/platforms/*.py` — platform-specific integrations
 - `requirements.txt` — dependencies
 

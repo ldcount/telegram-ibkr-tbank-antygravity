@@ -73,22 +73,6 @@ class Aggregator:
         return summary
 
     def format_message(self, summary):
-        # Template:
-        # Portfolio summary {current date}
-        #
-        # <b>RUB</b>
-        # T-BANK: <code>₽{amount_in_rub}</code> or <code>${amount_in_USD}</code>
-        #
-        # <b>CRYPTO USD</b>
-        # ByBit: <code>${amount_in_usd}</code>
-        # OKX: <code>${amount_in_usd}</code>
-        # Total crypto: <code>${amount_in_usd}</code>
-        #
-        # <b>STOCKS USD</b>
-        # IBKR: <code>${amount_in_usd}</code>
-        #
-        # TOTAL (USD): <code>${amount_in_usd}</code>
-        # TOTAL (RUB): <code>₽{amount_in_rub}</code>
 
         from datetime import datetime
 
@@ -159,9 +143,27 @@ class Aggregator:
                 ibkr_line += f" (ERROR: {summary['errors']['ibkr']})"
             lines.append(ibkr_line)
             lines.append("")
-        
+
         lines.append(f"<b>TOTAL</b>")
         lines.append(f"USD: <code>{fmt(grand_total_usd, 'USD')}</code>")
         lines.append(f"RUB: <code>{fmt(grand_total_rub, 'RUB')}</code>")
 
         return "\n".join(lines)
+
+    def get_totals(self, summary) -> tuple[float, float]:
+        """
+        Return (grand_total_usd, grand_total_rub) from a summary dict.
+        Uses the same logic as format_message so values are consistent.
+        """
+        tbank_rub_val = summary.get("tbank_rub", 0.0)
+        tbank_usd_val = summary.get("tbank_usd", 0.0)
+        crypto_usd = summary.get("crypto_usd", 0.0)
+        ibkr_usd = summary.get("ibkr_usd", 0.0)
+
+        implied_rate = 90.0
+        if tbank_usd_val > 0:
+            implied_rate = tbank_rub_val / tbank_usd_val
+
+        grand_total_usd = crypto_usd + tbank_usd_val + ibkr_usd
+        grand_total_rub = tbank_rub_val + ((crypto_usd + ibkr_usd) * implied_rate)
+        return grand_total_usd, grand_total_rub
