@@ -159,7 +159,7 @@ class TelegramBot:
             usd_fmt = f"${e['USD']:,.0f}".replace(",", " ")
             rub_fmt = f"₽{e['RUB']:,.0f}".replace(",", " ")
             lines.append(
-                f"<b>{e['date']}</b>  USD: <code>{usd_fmt}</code>  RUB: <code>{rub_fmt}</code>"
+                f"<b>{e['date']}</b>  <code>{usd_fmt}</code> => <code>{rub_fmt}</code>"
             )
 
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")

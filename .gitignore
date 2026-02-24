@@ -22,5 +22,5 @@ Thumbs.db
 # Logs
 *.log
 
-# Portfolio history (live data — managed on server)
+# Portfolio history (live data — managed on server, no need to push from here)
 data/portfolio_history.json
