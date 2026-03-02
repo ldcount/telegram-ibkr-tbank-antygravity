@@ -1,14 +1,25 @@
+import asyncio
 import logging
-from telegram import Update
+import os
+from datetime import datetime, timedelta
+
+from telegram import InputFile, Update
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes
-from datetime import datetime
+
 from app.config import Config
 from app.aggregator import Aggregator
 from app import history_manager
 from app import chart as chart_module
 
 logger = logging.getLogger(__name__)
+
+# Absolute path to the history JSON — used by /export
+_HISTORY_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data",
+    "portfolio_history.json",
+)
 
 
 class TelegramBot:
@@ -32,6 +43,10 @@ class TelegramBot:
         )
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("history", self.history_command))
+        self.application.add_handler(
+            CommandHandler("pie_chart", self.pie_chart_command)
+        )
+        self.application.add_handler(CommandHandler("export", self.export_command))
 
         # Add scheduled job
         if self.application.job_queue:
@@ -43,9 +58,37 @@ class TelegramBot:
     # Scheduling helpers
     # ------------------------------------------------------------------
 
+    def _seconds_until_next_slot(self) -> float:
+        """
+        Compute seconds until the next 8AM-anchored slot.
+
+        Slots are:  08:00, 08:00 + interval, 08:00 + 2*interval, …
+        If the current time is before 08:00 today, the first slot IS 08:00.
+        If no slot remains within today, the next slot is 08:00 tomorrow.
+        """
+        tz = Config.get_timezone_obj()
+        now = datetime.now(tz)
+        anchor = now.replace(
+            hour=Config.WINDOW_START_HOUR, minute=0, second=0, microsecond=0
+        )
+        interval_sec = self.poll_interval_minutes * 60
+
+        if now < anchor:
+            # Before the anchor today — first slot is the anchor itself
+            delay = (anchor - now).total_seconds()
+        else:
+            elapsed = (now - anchor).total_seconds()
+            slots_passed = int(elapsed // interval_sec)
+            next_slot = anchor + timedelta(seconds=(slots_passed + 1) * interval_sec)
+            delay = (next_slot - now).total_seconds()
+
+        return max(delay, 1.0)  # never zero to avoid immediate double-fire
+
     def _schedule_job(self):
         """Schedule (or reschedule) the repeating portfolio snapshot job."""
         interval_sec = self.poll_interval_minutes * 60
+        first_sec = self._seconds_until_next_slot()
+
         # Remove any existing jobs with our name to avoid duplicates
         current_jobs = self.application.job_queue.get_jobs_by_name("portfolio_snapshot")
         for job in current_jobs:
@@ -54,13 +97,15 @@ class TelegramBot:
         self.application.job_queue.run_repeating(
             self.scheduled_job,
             interval=interval_sec,
-            first=10,
+            first=first_sec,
             chat_id=self.chat_id,
             name="portfolio_snapshot",
         )
+        next_dt = datetime.now(Config.get_timezone_obj()) + timedelta(seconds=first_sec)
         logger.info(
-            f"Scheduled job every {self.poll_interval_minutes} min "
-            f"({Config.WINDOW_START_HOUR}:00–{Config.WINDOW_END_HOUR}:00)"
+            f"Scheduled job every {self.poll_interval_minutes} min. "
+            f"Next fire at {next_dt.strftime('%H:%M')} "
+            f"({Config.WINDOW_START_HOUR}:00–{Config.WINDOW_END_HOUR}:00 window)"
         )
 
     # ------------------------------------------------------------------
@@ -118,9 +163,13 @@ class TelegramBot:
         self.poll_interval_minutes = minutes
         self._schedule_job()
 
+        tz = Config.get_timezone_obj()
+        next_dt = datetime.now(tz) + timedelta(seconds=self._seconds_until_next_slot())
         logger.info(f"/frequency set to {minutes} min by {update.effective_chat.id}")
         await update.message.reply_text(
-            f"✅ Portfolio scan frequency updated to every <b>{minutes} minute(s)</b>.",
+            f"✅ Frequency updated to every <b>{minutes} minute(s)</b>.\n"
+            f"Next snapshot at <b>{next_dt.strftime('%H:%M')}</b> "
+            f"(anchored to {Config.WINDOW_START_HOUR:02d}:00).",
             parse_mode="HTML",
         )
 
@@ -134,8 +183,11 @@ class TelegramBot:
             "📋 <b>Available commands</b>\n\n"
             "/status — fetch the current portfolio snapshot\n"
             "/frequency &lt;minutes&gt; — set how often the bot sends automatic snapshots "
-            f"(current: every {self.poll_interval_minutes} min)\n"
-            "/history — view portfolio values for the last 30 days\n"
+            f"(current: every {self.poll_interval_minutes} min, anchored to "
+            f"{Config.WINDOW_START_HOUR:02d}:00)\n"
+            "/history — view portfolio values for the last 30 days + trend chart\n"
+            "/pie_chart — send a pie chart of current allocation by platform\n"
+            "/export — download raw portfolio history as a JSON file\n"
             "/help — show this help message"
         )
         await update.message.reply_text(msg, parse_mode="HTML")
@@ -165,24 +217,73 @@ class TelegramBot:
 
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
-        # --- Chart image ---
+        # --- Trend chart image ---
         try:
-            buf = chart_module.build_portfolio_chart(entries)
+            buf = await asyncio.to_thread(chart_module.build_portfolio_chart, entries)
             await update.message.reply_photo(
                 photo=buf,
                 caption="📈 Portfolio USD trend",
             )
         except RuntimeError as e:
-            # matplotlib not installed — skip chart silently
             logger.warning(f"Chart skipped (matplotlib unavailable): {e}")
         except (TimedOut, NetworkError) as e:
-            # Transient Telegram API hiccup — the photo may still arrive; don't alarm the user
             logger.warning(
                 f"Telegram network error while sending chart (photo may still arrive): {e}"
             )
         except Exception as e:
             logger.error(f"Chart generation failed: {e}")
             await update.message.reply_text("⚠️ Could not generate chart.")
+
+    async def pie_chart_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Handle /pie_chart — send a pie chart showing allocation by platform."""
+        if not self._is_authorized(update):
+            await update.message.reply_text("Unauthorized access.")
+            return
+
+        await update.message.reply_text("Generating pie chart…")
+        try:
+            summary = self.aggregator.get_portfolio_summary()
+            buf = await asyncio.to_thread(chart_module.build_pie_chart, summary)
+            await update.message.reply_photo(
+                photo=buf,
+                caption="🥧 Portfolio allocation by platform",
+            )
+        except RuntimeError as e:
+            logger.warning(f"Pie chart skipped (matplotlib unavailable): {e}")
+            await update.message.reply_text("⚠️ matplotlib is not installed.")
+        except ValueError as e:
+            await update.message.reply_text(f"⚠️ {e}")
+        except (TimedOut, NetworkError) as e:
+            logger.warning(f"Telegram network error sending pie chart: {e}")
+        except Exception as e:
+            logger.error(f"Pie chart generation failed: {e}")
+            await update.message.reply_text("⚠️ Could not generate pie chart.")
+
+    async def export_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /export — send portfolio_history.json as a file attachment."""
+        if not self._is_authorized(update):
+            await update.message.reply_text("Unauthorized access.")
+            return
+
+        if not os.path.exists(_HISTORY_FILE):
+            await update.message.reply_text(
+                "No history file found yet. It is created after the first scheduled snapshot."
+            )
+            return
+
+        try:
+            with open(_HISTORY_FILE, "rb") as f:
+                await update.message.reply_document(
+                    document=InputFile(f, filename="portfolio_history.json"),
+                    caption="📦 Raw portfolio history (DD-MM-YYYY → USD / RUB)",
+                )
+        except (TimedOut, NetworkError) as e:
+            logger.warning(f"Telegram network error sending export: {e}")
+        except Exception as e:
+            logger.error(f"Export failed: {e}")
+            await update.message.reply_text("⚠️ Could not send history file.")
 
     # ------------------------------------------------------------------
     # Scheduled job

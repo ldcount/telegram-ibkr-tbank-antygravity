@@ -24,6 +24,8 @@ Then it sends one formatted Telegram message with:
 4. A single HTML-formatted message is sent to your configured Telegram chat.
 5. After each scheduled report, the current portfolio totals are saved to `data/portfolio_history.json` (one entry per day).
 
+Scheduled snapshots are **anchored to `WINDOW_START_HOUR` (default 08:00)**. With a 3-hour interval the slots are 08:00, 11:00, 14:00, …. If you change `/frequency` mid-day, the next snapshot lands on the nearest upcoming anchor-aligned slot.
+
 Main entrypoint: `app/main.py`.
 
 ---
@@ -34,7 +36,9 @@ Main entrypoint: `app/main.py`.
 |---|---|
 | `/status` | Fetch and send the current portfolio snapshot immediately |
 | `/frequency <minutes>` | Change how often the bot sends automatic snapshots (e.g. `/frequency 60`) |
-| `/history` | Show portfolio values for up to the last 30 days |
+| `/history` | Show portfolio values for up to the last 30 days + trend chart |
+| `/pie_chart` | Send a pie chart of the current portfolio allocation by platform |
+| `/export` | Download raw portfolio history as a `portfolio_history.json` file attachment |
 | `/help` | List all available commands with descriptions |
 
 ---
@@ -221,8 +225,10 @@ python -m app.main
 
 Try in Telegram:
 - `/status` — immediate portfolio snapshot
-- `/frequency 5` — switch to 5-minute scan interval
-- `/history` — view past 30 days (5 dummy entries pre-loaded)
+- `/frequency 5` — switch to 5-minute scan interval (next fire aligned to 08:00 anchor)
+- `/history` — view past 30 days + trend chart
+- `/pie_chart` — allocation pie chart (Crypto / IBKR / T-Bank)
+- `/export` — download `portfolio_history.json`
 - `/help` — list all commands
 
 ---

@@ -1,10 +1,9 @@
 """
-chart.py — generates an in-memory portfolio USD line chart using matplotlib.
+chart.py — in-memory portfolio charts using matplotlib.
 
-Usage:
-    from app.chart import build_portfolio_chart
-    buf = build_portfolio_chart(entries)   # entries from history_manager.get_history()
-    await context.bot.send_photo(chat_id=chat_id, photo=buf)
+Public API:
+    build_portfolio_chart(entries)  -> io.BytesIO  (line chart, last 30 days)
+    build_pie_chart(summary)        -> io.BytesIO  (pie chart, current allocation)
 """
 
 import io
@@ -110,4 +109,81 @@ def build_portfolio_chart(entries: list[dict]) -> io.BytesIO:
     buf.seek(0)
 
     logger.info(f"Portfolio chart built with {len(sampled)} data points.")
+    return buf
+
+
+def build_pie_chart(summary: dict) -> io.BytesIO:
+    """
+    Build a pie chart showing current portfolio allocation by platform.
+
+    Parameters
+    ----------
+    summary : dict  as returned by Aggregator.get_portfolio_summary()
+
+    Returns
+    -------
+    io.BytesIO — PNG image buffer (position reset to 0).
+    """
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise RuntimeError(
+            "matplotlib is not installed. Run: pip install matplotlib"
+        ) from exc
+
+    crypto_usd = summary.get("crypto_usd", 0.0)
+    ibkr_usd = summary.get("ibkr_usd", 0.0)
+    tbank_usd = summary.get("tbank_usd", 0.0)
+
+    labels_raw = ["Crypto (Bybit+OKX)", "IBKR", "T-Bank"]
+    values_raw = [crypto_usd, ibkr_usd, tbank_usd]
+    colors_raw = ["#4A90D9", "#27AE60", "#E67E22"]
+
+    # Drop zero-value segments
+    data = [(l, v, c) for l, v, c in zip(labels_raw, values_raw, colors_raw) if v > 0]
+
+    if not data:
+        raise ValueError("All platform balances are zero — nothing to plot.")
+
+    labels, values, colors = zip(*data)
+    total = sum(values)
+
+    def autopct(pct):
+        amount = pct / 100 * total
+        return f"{pct:.1f}%\n${amount:,.0f}".replace(",", " ")
+
+    fig, ax = plt.subplots(figsize=(7, 5), dpi=120)
+    wedges, texts, autotexts = ax.pie(
+        values,
+        labels=labels,
+        colors=colors,
+        autopct=autopct,
+        startangle=140,
+        pctdistance=0.75,
+        wedgeprops=dict(linewidth=1.5, edgecolor="white"),
+    )
+
+    for t in texts:
+        t.set_fontsize(10)
+    for at in autotexts:
+        at.set_fontsize(8)
+        at.set_color("white")
+
+    ax.set_title(
+        f"Portfolio allocation  —  ${total:,.0f} total".replace(",", " "),
+        fontsize=11,
+        pad=14,
+    )
+
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+
+    logger.info(f"Pie chart built: {dict(zip(labels, values))}")
     return buf
