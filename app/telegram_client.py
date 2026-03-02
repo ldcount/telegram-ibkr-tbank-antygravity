@@ -1,5 +1,6 @@
 import logging
 from telegram import Update
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes
 from datetime import datetime
 from app.config import Config
@@ -174,6 +175,11 @@ class TelegramBot:
         except RuntimeError as e:
             # matplotlib not installed — skip chart silently
             logger.warning(f"Chart skipped (matplotlib unavailable): {e}")
+        except (TimedOut, NetworkError) as e:
+            # Transient Telegram API hiccup — the photo may still arrive; don't alarm the user
+            logger.warning(
+                f"Telegram network error while sending chart (photo may still arrive): {e}"
+            )
         except Exception as e:
             logger.error(f"Chart generation failed: {e}")
             await update.message.reply_text("⚠️ Could not generate chart.")
