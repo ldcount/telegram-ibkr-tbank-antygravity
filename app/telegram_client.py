@@ -3,9 +3,9 @@ import logging
 import os
 from datetime import datetime, timedelta
 
-from telegram import InputFile, Update
+from telegram import InputFile, Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import NetworkError, TimedOut
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 
 from app.config import Config
 from app.aggregator import Aggregator
@@ -38,6 +38,7 @@ class TelegramBot:
 
         # Add command handlers
         self.application.add_handler(CommandHandler("status", self.status_command))
+        self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(
             CommandHandler("frequency", self.frequency_command)
         )
@@ -47,6 +48,7 @@ class TelegramBot:
             CommandHandler("pie_chart", self.pie_chart_command)
         )
         self.application.add_handler(CommandHandler("export", self.export_command))
+        self.application.add_handler(CallbackQueryHandler(self.handle_callback))
 
         # Add scheduled job
         if self.application.job_queue:
@@ -116,8 +118,34 @@ class TelegramBot:
         return str(update.effective_chat.id) == str(self.chat_id)
 
     # ------------------------------------------------------------------
-    # Command handlers
-    # ------------------------------------------------------------------
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /start — onboarding experience."""
+        if not self._is_authorized(update):
+            await update.message.reply_text("Unauthorized access.")
+            return
+
+        msg = (
+            "👋 <b>Welcome to your Portfolio Tracker!</b>\n\n"
+            "I monitor your balances across various platforms (Crypto, T-Bank, IBKR) "
+            "and provide regular summaries.\n\n"
+            "What would you like to see?"
+        )
+        await update.message.reply_text(
+            msg, parse_mode="HTML", reply_markup=self._get_status_keyboard()
+        )
+
+    def _get_status_keyboard(self) -> InlineKeyboardMarkup:
+        """Helper to return the standard inline keyboard for the status message."""
+        keyboard = [
+            [
+                InlineKeyboardButton("🔄 Refresh", callback_data="refresh_status"),
+            ],
+            [
+                InlineKeyboardButton("📈 30-Day Trend", callback_data="show_history"),
+                InlineKeyboardButton("🥧 Allocation", callback_data="show_pie_chart"),
+            ],
+        ]
+        return InlineKeyboardMarkup(keyboard)
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /status — fetch and send current portfolio snapshot."""
@@ -126,14 +154,28 @@ class TelegramBot:
             return
 
         logger.info(f"/status from {update.effective_chat.id}")
-        await update.message.reply_text("Fetching data...")
+
+        # We send an initial "Generating..." message so we can edit it later.
+        # This feels more responsive than waiting silently.
+        status_msg = await update.message.reply_text("Fetching data...")
+
         try:
             summary = self.aggregator.get_portfolio_summary()
             msg = self.aggregator.format_message(summary)
-            await update.message.reply_text(msg, parse_mode="HTML")
+            # Add timestamp to show when it was last generated
+            now = datetime.now(Config.get_timezone_obj()).strftime("%H:%M:%S")
+            msg += f"\n<i>Last updated: {now}</i>"
+
+            await status_msg.edit_text(
+                text=msg, parse_mode="HTML", reply_markup=self._get_status_keyboard()
+            )
+
+            # Save snapshot on manual request
+            usd, rub = self.aggregator.get_totals(summary)
+            history_manager.save_snapshot(usd, rub)
         except Exception as e:
             logger.error(f"Error in /status: {e}")
-            await update.message.reply_text(f"Error fetching status: {e}")
+            await status_msg.edit_text(f"Error fetching status: {e}")
 
     async def frequency_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -198,9 +240,13 @@ class TelegramBot:
             await update.message.reply_text("Unauthorized access.")
             return
 
+        await self._send_history(update.message.reply_text, update.message.reply_photo)
+
+    async def _send_history(self, reply_text, reply_photo):
+        """Internal logic for sending history, usable by both commands and callbacks."""
         entries = history_manager.get_history(30)
         if not entries:
-            await update.message.reply_text(
+            await reply_text(
                 "No portfolio history recorded yet. "
                 "Data is saved automatically on each scheduled snapshot."
             )
@@ -215,12 +261,12 @@ class TelegramBot:
                 f"<b>{e['date']}</b>  <code>{usd_fmt}</code> => <code>{rub_fmt}</code>"
             )
 
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        await reply_text("\n".join(lines), parse_mode="HTML")
 
         # --- Trend chart image ---
         try:
             buf = await asyncio.to_thread(chart_module.build_portfolio_chart, entries)
-            await update.message.reply_photo(
+            await reply_photo(
                 photo=buf,
                 caption="📈 Portfolio USD trend",
             )
@@ -232,7 +278,7 @@ class TelegramBot:
             )
         except Exception as e:
             logger.error(f"Chart generation failed: {e}")
-            await update.message.reply_text("⚠️ Could not generate chart.")
+            await reply_text("⚠️ Could not generate chart.")
 
     async def pie_chart_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -242,24 +288,30 @@ class TelegramBot:
             await update.message.reply_text("Unauthorized access.")
             return
 
-        await update.message.reply_text("Generating pie chart…")
+        await self._send_pie_chart(
+            update.message.reply_text, update.message.reply_photo
+        )
+
+    async def _send_pie_chart(self, reply_text, reply_photo):
+        """Internal logic for sending pie chart, usable by both commands and callbacks."""
+        await reply_text("Generating pie chart…")
         try:
             summary = self.aggregator.get_portfolio_summary()
             buf = await asyncio.to_thread(chart_module.build_pie_chart, summary)
-            await update.message.reply_photo(
+            await reply_photo(
                 photo=buf,
                 caption="🥧 Portfolio allocation by platform",
             )
         except RuntimeError as e:
             logger.warning(f"Pie chart skipped (matplotlib unavailable): {e}")
-            await update.message.reply_text("⚠️ matplotlib is not installed.")
+            await reply_text("⚠️ matplotlib is not installed.")
         except ValueError as e:
-            await update.message.reply_text(f"⚠️ {e}")
+            await reply_text(f"⚠️ {e}")
         except (TimedOut, NetworkError) as e:
             logger.warning(f"Telegram network error sending pie chart: {e}")
         except Exception as e:
             logger.error(f"Pie chart generation failed: {e}")
-            await update.message.reply_text("⚠️ Could not generate pie chart.")
+            await reply_text("⚠️ Could not generate pie chart.")
 
     async def export_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /export — send portfolio_history.json as a file attachment."""
@@ -284,6 +336,64 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Export failed: {e}")
             await update.message.reply_text("⚠️ Could not send history file.")
+
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle button clicks from inline keyboards."""
+        query = update.callback_query
+
+        # We must answer the callback query, even if empty, or the button will show a loading spinner
+        if not self._is_authorized(update):
+            await query.answer("Unauthorized.", show_alert=True)
+            return
+
+        data = query.data
+
+        if data == "refresh_status":
+            await query.answer("Refreshing data...")
+            try:
+                summary = self.aggregator.get_portfolio_summary()
+                msg = self.aggregator.format_message(summary)
+                now = datetime.now(Config.get_timezone_obj()).strftime("%H:%M:%S")
+                msg += f"\n<i>Last updated: {now}</i>"
+
+                await query.edit_message_text(
+                    text=msg,
+                    parse_mode="HTML",
+                    reply_markup=self._get_status_keyboard(),
+                )
+
+                # Save snapshot on manual refresh
+                usd, rub = self.aggregator.get_totals(summary)
+                history_manager.save_snapshot(usd, rub)
+            except Exception as e:
+                logger.error(f"Error refreshing status via callback: {e}")
+                # We append the error so they know it failed, but keep the keyboard so they can try again later
+                error_msg = f"<b>⚠️ Error refreshing data: {e}</b>"
+                # If they quickly click refresh twice and the text is identical, Telegram throws a BadRequest.
+                # Adding the exact time prevents identical texts.
+                import time
+
+                try:
+                    await query.edit_message_text(
+                        text=error_msg
+                        + f"\n<i>Failed at {time.strftime('%H:%M:%S')}</i>",
+                        parse_mode="HTML",
+                        reply_markup=self._get_status_keyboard(),
+                    )
+                except Exception:
+                    pass
+
+        elif data == "show_history":
+            await query.answer()
+            await self._send_history(
+                query.message.reply_text, query.message.reply_photo
+            )
+
+        elif data == "show_pie_chart":
+            await query.answer()
+            await self._send_pie_chart(
+                query.message.reply_text, query.message.reply_photo
+            )
 
     # ------------------------------------------------------------------
     # Scheduled job
