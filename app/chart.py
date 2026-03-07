@@ -47,7 +47,7 @@ def build_portfolio_chart(entries: list[dict]) -> io.BytesIO:
 
     # Sample every nth point (keep first and last to anchor the chart properly)
     if len(chronological) > 3:
-        sampled = chronological[::1]
+        sampled = chronological[::2]
         # Always include the most recent point
         if chronological[-1] not in sampled:
             sampled.append(chronological[-1])
@@ -59,7 +59,7 @@ def build_portfolio_chart(entries: list[dict]) -> io.BytesIO:
     usd_values = [e["USD"] for e in sampled]
 
     # --- Build the figure ---
-    fig, ax = plt.subplots(figsize=(9, 4), dpi=120)
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=120)
 
     ax.plot(
         dates,
