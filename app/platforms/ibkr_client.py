@@ -1,6 +1,8 @@
 import logging
+import time
 import requests
 import xml.etree.ElementTree as ET
+from requests.exceptions import ConnectionError, Timeout
 from app.config import Config
 
 logger = logging.getLogger(__name__)
@@ -19,55 +21,71 @@ class IBKRClient:
     def get_portfolio_summary(self) -> dict:
         """
         Fetches the portfolio summary via Flex Query.
+        Retries up to 3 times on transient network/DNS errors.
         Returns:
             {"total_usd": float, "error": str|None}
         """
         if not self.token or not self.query_id:
             return {"total_usd": 0.0}
 
-        try:
-            # Step 1: Request the report
-            logger.info("Requesting IBKR Flex Report...")
-            resp = requests.get(
-                self.base_url,
-                params={"t": self.token, "q": self.query_id, "v": "3"},
-                timeout=10,
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                return self._fetch_report()
+            except (ConnectionError, Timeout, OSError) as e:
+                last_error = e
+                if attempt < 2:
+                    wait = 2 ** (attempt + 1)  # 2 s, then 4 s
+                    logger.warning(
+                        f"IBKR network error (attempt {attempt + 1}/3), retrying in {wait}s: {e}"
+                    )
+                    time.sleep(wait)
+            except Exception as e:
+                # Non-retryable error (e.g. bad XML, HTTP 4xx) — fail immediately
+                logger.error(f"IBKR Flex Query Error: {e}")
+                return {"total_usd": 0.0, "error": str(e)}
+
+        logger.error(f"IBKR: all 3 attempts failed: {last_error}")
+        return {"total_usd": 0.0, "error": str(last_error)}
+
+    def _fetch_report(self) -> dict:
+        """Single attempt to fetch the IBKR Flex report. Raises on network errors."""
+        # Step 1: Request the report
+        logger.info("Requesting IBKR Flex Report...")
+        resp = requests.get(
+            self.base_url,
+            params={"t": self.token, "q": self.query_id, "v": "3"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+
+        # Parse step 1 XML
+        root = ET.fromstring(resp.content)
+        status = root.find("Status")
+
+        if status is not None and status.text == "Success":
+            ref_code = root.find("ReferenceCode").text
+            base_url = root.find("Url").text
+
+            logger.info(f"IBKR Report generated. Reference: {ref_code}. Downloading...")
+
+            # Step 2: Download the report
+            dl_resp = requests.get(
+                base_url,
+                params={"t": self.token, "q": ref_code, "v": "3"},
+                timeout=30,
             )
-            resp.raise_for_status()
+            dl_resp.raise_for_status()
 
-            # Parse step 1 XML
-            root = ET.fromstring(resp.content)
+            # Parse step 2 XML (Actual Report)
+            return self._parse_report(dl_resp.content)
 
-            status = root.find("Status")
-            if status is not None and status.text == "Success":
-                ref_code = root.find("ReferenceCode").text
-                base_url = root.find("Url").text
-
-                logger.info(
-                    f"IBKR Report generated. Reference: {ref_code}. Downloading..."
-                )
-
-                # Step 2: Download the report
-                dl_resp = requests.get(
-                    base_url,
-                    params={"t": self.token, "q": ref_code, "v": "3"},
-                    timeout=30,
-                )
-                dl_resp.raise_for_status()
-
-                # Parse step 2 XML (Actual Report)
-                return self._parse_report(dl_resp.content)
-
-            else:
-                error_code = root.find("ErrorCode")
-                error_msg = root.find("ErrorMessage")
-                msg = f"IBKR Error {error_code.text if error_code is not None else '?'}: {error_msg.text if error_msg is not None else '?'}"
-                logger.error(msg)
-                return {"total_usd": 0.0, "error": msg}
-
-        except Exception as e:
-            logger.error(f"IBKR Flex Query Error: {e}")
-            return {"total_usd": 0.0, "error": str(e)}
+        else:
+            error_code = root.find("ErrorCode")
+            error_msg = root.find("ErrorMessage")
+            msg = f"IBKR Error {error_code.text if error_code is not None else '?'}: {error_msg.text if error_msg is not None else '?'}"
+            logger.error(msg)
+            return {"total_usd": 0.0, "error": msg}
 
     def _parse_report(self, xml_content) -> dict:
         """

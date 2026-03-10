@@ -49,6 +49,7 @@ class TelegramBot:
         )
         self.application.add_handler(CommandHandler("export", self.export_command))
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
+        self.application.add_error_handler(self.error_handler)
 
         # Add scheduled job
         if self.application.job_queue:
@@ -111,6 +112,20 @@ class TelegramBot:
         )
 
     # ------------------------------------------------------------------
+    # Global error handler
+    # ------------------------------------------------------------------
+
+    async def error_handler(
+        self, update: object, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Log errors. Swallow transient network errors silently."""
+        err = context.error
+        if isinstance(err, (NetworkError, TimedOut)):
+            logger.warning(f"Transient Telegram network error (ignored): {err}")
+        else:
+            logger.error(f"Unhandled exception in update handler: {err}", exc_info=err)
+
+    # ------------------------------------------------------------------
     # Auth helper
     # ------------------------------------------------------------------
 
@@ -155,9 +170,20 @@ class TelegramBot:
 
         logger.info(f"/status from {update.effective_chat.id}")
 
-        # We send an initial "Generating..." message so we can edit it later.
-        # This feels more responsive than waiting silently.
-        status_msg = await update.message.reply_text("Fetching data...")
+        # Send placeholder — retry on transient network errors so the command
+        # doesn't silently vanish if the connection blips at this exact moment.
+        status_msg = None
+        for attempt in range(4):
+            try:
+                status_msg = await update.message.reply_text("Fetching data...")
+                break
+            except (NetworkError, TimedOut) as e:
+                if attempt == 3:
+                    logger.warning(
+                        f"/status: could not send placeholder after 4 attempts: {e}"
+                    )
+                    return
+                await asyncio.sleep(2**attempt)  # 1 s, then 2 s
 
         try:
             summary = self.aggregator.get_portfolio_summary()
@@ -431,4 +457,7 @@ class TelegramBot:
             return
 
         logger.info("Starting Telegram Bot polling...")
-        self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+        self.application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            bootstrap_retries=5,  # retry connecting to Telegram on startup (was: 0 = crash immediately)
+        )

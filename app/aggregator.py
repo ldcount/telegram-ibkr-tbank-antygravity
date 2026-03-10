@@ -77,7 +77,7 @@ class Aggregator:
 
         from datetime import datetime
 
-        current_date = datetime.now().strftime("%d-%m-%Y")
+        current_date = datetime.now().strftime("%d %b %Y")
 
         # Helper for formatting: no decimals, space as thousand separator
         def fmt(val, currency="$"):
