@@ -6,6 +6,8 @@ logger = logging.getLogger(__name__)
 
 
 class BybitClient:
+    ASSET_OVERVIEW_PATH = "/v5/asset/asset-overview"
+
     STABLECOINS_1_TO_1_USD = {
         "USD",
         "USDT",
@@ -34,22 +36,58 @@ class BybitClient:
 
     def get_balance_usd(self) -> float:
         """
-        Fetch the total Bybit balance in USD by summing:
-        - Unified Trading Account equity
-        - Funding wallet balances, converted to USD when needed
+        Fetch the total Bybit balance in USD across all Bybit asset buckets.
+
+        Bybit's asset overview endpoint includes balances from account types
+        like Unified Trading, Funding, and TradFi in one valuation currency.
+        Fall back to the legacy UNIFIED + FUND aggregation if the newer
+        endpoint is unavailable for the current API key or SDK.
         """
         if not self.client:
             logger.error("Bybit client not initialized.")
             raise RuntimeError("Bybit client not initialized")
 
         try:
-            unified_total_usd = self._get_unified_balance_usd()
-            fund_total_usd = self._get_fund_balance_usd()
-            return unified_total_usd + fund_total_usd
+            return self._get_asset_overview_balance_usd()
 
         except Exception as e:
-            logger.error(f"Error fetching Bybit balance: {e}")
-            raise
+            logger.warning(
+                "Bybit asset overview failed, falling back to legacy balance "
+                f"aggregation: {e}"
+            )
+            try:
+                unified_total_usd = self._get_unified_balance_usd()
+                fund_total_usd = self._get_fund_balance_usd()
+                return unified_total_usd + fund_total_usd
+            except Exception as fallback_error:
+                logger.error(f"Error fetching Bybit balance: {fallback_error}")
+                raise
+
+    def _get_asset_overview_balance_usd(self) -> float:
+        response = self.client._submit_request(
+            method="GET",
+            path=f"{self.client.endpoint}{self.ASSET_OVERVIEW_PATH}",
+            query={"valuationCurrency": "USD"},
+            auth=True,
+        )
+
+        if response.get("retCode") != 0:
+            msg = f"Bybit asset overview API Error: {response.get('retMsg')}"
+            logger.error(msg)
+            raise RuntimeError(msg)
+
+        result = response.get("result", {})
+        total_equity = result.get("totalEquity")
+
+        if total_equity is not None:
+            return float(total_equity)
+
+        account_list = result.get("list", [])
+        if not account_list:
+            logger.warning("Bybit asset overview: No accounts found in response.")
+            return 0.0
+
+        return sum(float(account.get("totalEquity") or 0.0) for account in account_list)
 
     def _get_unified_balance_usd(self) -> float:
         # Request the UNIFIED account from Bybit. This is the trading account
